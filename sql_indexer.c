@@ -1,92 +1,29 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include "sql_indexer.h" // Include the new header
 #include <string.h>
 #include <ctype.h>   // For tolower, isspace, isalnum
 #include <errno.h>   // For errno
-#include <stdbool.h> // For bool type
 
-// --- Constants ---
+// --- Constants (Definitions moved to header, declared as extern) ---
 const char *CREATE_TABLE_KEYWORD = "CREATE TABLE";
 const size_t CREATE_TABLE_LEN = 12; // strlen("CREATE TABLE")
 const size_t CHUNK_SIZE = 65536; // 64KB read chunk
 const size_t BUFFER_EXTRA_MARGIN = 512; // Safety margin for lookaheads, names etc.
 
-// --- Parser State Enum ---
-typedef enum {
-    STATE_CODE, STATE_SL_COMMENT, STATE_ML_COMMENT,
-    STATE_S_QUOTE_STRING, STATE_D_QUOTE_STRING, STATE_BACKTICK_IDENTIFIER
-} ParserState;
-
-// --- Data Structures ---
-typedef struct {
-    long long offset;
-    long long line;
-    long long column;
-    char *name;
-} TableEntry;
-
-typedef struct {
-    TableEntry *entries;
-    size_t count;
-    size_t capacity;
-} TableIndex;
-
-// --- Parsing Context ---
-// Structure to hold the state during parsing
-typedef struct {
-    FILE *fp;
-    char *buffer;
-    size_t buffer_alloc_size;
-    size_t buffer_data_len; // Valid data currently in buffer
-    long long global_offset; // File offset corresponding to buffer[0]
-    long long current_line;
-    long long last_newline_offset; // Offset *of* the last '\n' character
-    ParserState state;
-    TableIndex index;
-    bool error_occurred; // Flag to signal fatal errors
-} ParsingContext;
 
 
-// --- Forward Declarations ---
-bool initialize_context(ParsingContext *ctx, const char *filename);
-void cleanup_context(ParsingContext *ctx);
-bool process_sql_file(ParsingContext *ctx);
-size_t process_chunk(ParsingContext *ctx);
-void update_parser_state(ParsingContext *ctx, char current_char, char next_char, char **ptr_ref);
-bool handle_code_state(ParsingContext *ctx, char **ptr_ref, char *buffer_end);
-bool parse_table_name(const char *start_ptr, const char *limit, const char **name_start_out, size_t *name_len_out, const char **end_ptr_out);
-bool add_entry(TableIndex *index, long long offset, long long line, long long col, const char *name_start, size_t name_len);
-int strncasecmp_custom(const char *s1, const char *s2, size_t n);
-bool is_keyword_boundary(char char_before, char char_after);
-void print_results(const TableIndex *index);
 
-// --- Main Function (Simplified) ---
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <sql_file>\n", argv[0]);
-        return EXIT_FAILURE;
-    }
+// --- Forward Declarations (Moved to header or internal static) ---
+// Internal helper functions not needed outside this file
+static size_t process_chunk(ParsingContext *ctx);
+static void update_parser_state(ParsingContext *ctx, char current_char, char next_char, char **ptr_ref);
+static bool handle_code_state(ParsingContext *ctx, char **ptr_ref, char *buffer_end);
+static bool parse_table_name(const char *start_ptr, const char *limit, const char **name_start_out, size_t *name_len_out, const char **end_ptr_out);
+static bool add_entry(TableIndex *index, long long offset, long long line, long long col, const char *name_start, size_t name_len);
+static int strncasecmp_custom(const char *s1, const char *s2, size_t n);
+static bool is_keyword_boundary(char char_before, char char_after);
+// print_results is declared in header
 
-    ParsingContext ctx = {0}; // Initialize context struct to zero/NULL
 
-    if (!initialize_context(&ctx, argv[1])) {
-        // Error message already printed by initialize_context or its callees
-        cleanup_context(&ctx); // Attempt cleanup even on partial initialization
-        return EXIT_FAILURE;
-    }
-
-    bool success = process_sql_file(&ctx);
-
-    if (success && !ctx.error_occurred) {
-        print_results(&ctx.index);
-    } else {
-         fprintf(stderr, "Processing failed or errors occurred.\n");
-    }
-
-    cleanup_context(&ctx);
-
-    return (success && !ctx.error_occurred) ? EXIT_SUCCESS : EXIT_FAILURE;
-}
 
 // --- Function Implementations ---
 
@@ -188,7 +125,8 @@ bool process_sql_file(ParsingContext *ctx) {
 
 // Process a buffer full of data, updating context state
 // Returns the number of bytes processed from the start of the buffer.
-size_t process_chunk(ParsingContext *ctx) {
+// Made static as it's only called internally by process_sql_file
+static size_t process_chunk(ParsingContext *ctx) {
     char *ptr = ctx->buffer;
     char *buffer_end = ctx->buffer + ctx->buffer_data_len;
 
@@ -231,7 +169,8 @@ size_t process_chunk(ParsingContext *ctx) {
 }
 
 // Updates the parser state based on current/next char, advances ptr past multi-char tokens
-void update_parser_state(ParsingContext *ctx, char current_char, char next_char, char **ptr_ref) {
+// Made static as it's only called internally by process_chunk
+static void update_parser_state(ParsingContext *ctx, char current_char, char next_char, char **ptr_ref) {
      char *ptr = *ptr_ref; // Local copy for easier reading
 
     switch (ctx->state) {
@@ -285,7 +224,8 @@ void update_parser_state(ParsingContext *ctx, char current_char, char next_char,
 
 // Handles logic specific to STATE_CODE, including keyword detection
 // Advances *ptr_ref past handled sequences. Returns true on success, false on fatal error.
-bool handle_code_state(ParsingContext *ctx, char **ptr_ref, char *buffer_end) {
+// Made static as it's only called internally by process_chunk
+static bool handle_code_state(ParsingContext *ctx, char **ptr_ref, char *buffer_end) {
     char *ptr = *ptr_ref;
     char current_char = *ptr;
     char next_char = (ptr + 1 < buffer_end) ? *(ptr + 1) : '\0';
@@ -361,7 +301,8 @@ bool handle_code_state(ParsingContext *ctx, char **ptr_ref, char *buffer_end) {
 
 // Parses table name after 'CREATE TABLE', returns true if name syntax seems valid (even if empty)
 // Outputs name details and advances end_ptr_out to the position *after* the parsed name.
-bool parse_table_name(const char *start_ptr, const char *limit, const char **name_start_out, size_t *name_len_out, const char **end_ptr_out) {
+// Made static as it's only called internally by handle_code_state
+static bool parse_table_name(const char *start_ptr, const char *limit, const char **name_start_out, size_t *name_len_out, const char **end_ptr_out) {
     const char *parser = start_ptr;
     const char *name_start = NULL;
     const char *name_end = NULL;
@@ -414,7 +355,7 @@ bool parse_table_name(const char *start_ptr, const char *limit, const char **nam
         name_end = parser;
         name_found_potentially = true; // Found end of unquoted name sequence
     } else {
-         // Didn't find quoted or valid unquoted start char
+         // Didn't find quoting or valid unquoted start char
          *end_ptr_out = parser; // End where we stopped
          return false; // Indicate no valid name started here
     }
@@ -434,7 +375,8 @@ bool parse_table_name(const char *start_ptr, const char *limit, const char **nam
 
 
 // Add entry to index (dynamic array resizing) - Returns true on success
-bool add_entry(TableIndex *index, long long offset, long long line, long long col, const char *name_start, size_t name_len) {
+// Made static as it's only called internally by handle_code_state
+static bool add_entry(TableIndex *index, long long offset, long long line, long long col, const char *name_start, size_t name_len) {
     if (index->count >= index->capacity) {
         size_t new_capacity = index->capacity == 0 ? 16 : index->capacity * 2;
         if (new_capacity < index->capacity) {
@@ -467,7 +409,8 @@ bool add_entry(TableIndex *index, long long offset, long long line, long long co
 }
 
 // Case-insensitive string comparison (simple version)
-int strncasecmp_custom(const char *s1, const char *s2, size_t n) {
+// Made static as it's only called internally by handle_code_state
+static int strncasecmp_custom(const char *s1, const char *s2, size_t n) {
     if (n == 0) return 0;
     while (n-- > 0 && tolower((unsigned char)*s1) == tolower((unsigned char)*s2)) {
         if (n == 0 || *s1 == '\0') break; // Matched n chars or end of string
@@ -479,7 +422,8 @@ int strncasecmp_custom(const char *s1, const char *s2, size_t n) {
 
 
 // Check boundary characters for the keyword
-bool is_keyword_boundary(char char_before, char char_after) {
+// Made static as it's only called internally by handle_code_state
+static bool is_keyword_boundary(char char_before, char char_after) {
     bool start_ok = (char_before == '\0' || isspace((unsigned char)char_before) || strchr(";(/*", char_before) != NULL);
     if (!start_ok) return false;
     bool end_ok = (char_after == '\0' || isspace((unsigned char)char_after) || char_after == '(');
