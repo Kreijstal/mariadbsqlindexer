@@ -2,15 +2,14 @@
 #define SQL_INDEXER_H
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <stddef.h>
+#include <stdbool.h> // Include for bool type
+#include <stddef.h> // Include for size_t
 
 // --- Constants ---
-extern const char *CREATE_TABLE_KEYWORD;
-extern const size_t CREATE_TABLE_LEN;
-extern const size_t CHUNK_SIZE;
-extern const size_t BUFFER_EXTRA_MARGIN;
+// extern const char *CREATE_TABLE_KEYWORD; // Defined in .c
+// extern const size_t CREATE_TABLE_LEN; // Defined in .c
+// extern const size_t CHUNK_SIZE; // Defined in .c
+// extern const size_t BUFFER_EXTRA_MARGIN; // Defined in .c
 
 // --- Parser State Enum ---
 typedef enum {
@@ -24,33 +23,52 @@ typedef enum {
 
 // --- Data Structures ---
 
+// Structure to hold column information
+typedef struct {
+    char *name;
+    char *type;
+    bool is_primary_key;
+    bool is_not_null;
+    bool is_auto_increment;
+    char *default_value;
+} ColumnInfo;
+
+// Structure to hold table information with columns
+typedef struct {
+    char *name;
+    ColumnInfo *columns;
+    int column_count;
+    int column_capacity;
+    int line_number;
+} TableInfo;
+
 // Structure to hold one index entry
 typedef struct {
-    long long offset;   // Byte offset in the file where "CREATE TABLE" starts
-    long long line;     // 1-based line number
-    long long column;   // 1-based column number
-    char *name;         // Dynamically allocated table name
-} TableEntry;
+    char *type; // e.g., "TABLE", "INDEX", "FUNCTION", "PROCEDURE"
+    char *name;
+    int line_number;
+    
+    // For TABLE entries only
+    TableInfo *table_info; // Will be NULL for non-table entries
+} IndexEntry;
 
-// Structure for the dynamic array of index entries
 typedef struct {
-    TableEntry *entries;
-    size_t count;       // Number of entries currently stored
-    size_t capacity;    // Allocated capacity of the entries array
-} TableIndex;
+    IndexEntry *entries;
+    int count;
+    int capacity;
+} SqlIndex;
 
-// Structure to hold the overall parsing context
 typedef struct {
-    FILE *fp;                   // File pointer for the SQL file
-    char *buffer;               // Read buffer
-    size_t buffer_alloc_size;   // Allocated size of the buffer
-    size_t buffer_data_len;     // Current amount of valid data in the buffer
-    long long global_offset;    // Global byte offset corresponding to buffer start
-    long long current_line;     // Current 1-based line number
-    long long last_newline_offset; // Global offset of the last encountered newline
-    ParserState state;          // Current parser state
-    TableIndex index;           // The index being built
-    bool error_occurred;        // Flag if a fatal error happened
+    FILE *file;                 // Renamed from fp
+    char *buffer;
+    size_t buffer_size;         // Renamed from buffer_alloc_size
+    size_t buffer_data_len;     // Added
+    size_t global_offset;       // Added
+    int current_line;           // Added
+    long last_newline_offset;   // Added
+    ParserState state;          // Added
+    SqlIndex index;
+    bool error_occurred; // Flag to indicate if an error stopped processing
 } ParsingContext;
 
 // --- Function Declarations ---
@@ -65,6 +83,15 @@ void cleanup_context(ParsingContext *ctx);
 bool process_sql_file(ParsingContext *ctx);
 
 // Print the indexed results
-void print_results(const TableIndex *index);
+void print_results(const SqlIndex *index);
+void cleanup_index(SqlIndex *index); // Function to clean up only the index structure
+bool read_index_from_file(SqlIndex *index, const char *index_filename); // Function to read index from file
+bool write_index_to_file(const SqlIndex *index, const char *index_filename); // Function to write index to file
+
+// Function to display interactive table selection and column display
+void display_table_columns_ui(SqlIndex *index);
+
+// Function to extract column information from CREATE TABLE statement
+bool parse_table_columns(ParsingContext *ctx, TableInfo *table_info, const char *start_ptr, const char *end_ptr);
 
 #endif // SQL_INDEXER_H
