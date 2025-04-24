@@ -5,6 +5,14 @@
 #include <stdbool.h> // Include for bool type
 #include <stddef.h> // Include for size_t
 
+// --- Global Verbose Flag ---
+extern bool verbose_mode;
+
+// --- Debug Macro ---
+#define DEBUG_PRINT(fmt, ...) \
+    do { if (verbose_mode) fprintf(stderr, "[DEBUG] %s:%d:%s(): " fmt "\n", \
+                                __FILE__, __LINE__, __func__, ##__VA_ARGS__); } while (0)
+
 // --- Constants ---
 // extern const char *CREATE_TABLE_KEYWORD; // Defined in .c
 // extern const size_t CREATE_TABLE_LEN; // Defined in .c
@@ -40,6 +48,7 @@ typedef struct {
     int column_count;
     int column_capacity;
     int line_number;
+    long end_offset; // Added: Byte offset after CREATE TABLE definition
 } TableInfo;
 
 // Structure to hold one index entry
@@ -93,5 +102,8 @@ void display_table_columns_ui(SqlIndex *index);
 
 // Function to extract column information from CREATE TABLE statement
 bool parse_table_columns(ParsingContext *ctx, TableInfo *table_info, const char *start_ptr, const char *end_ptr);
+
+// Function to get a sample of the first data row from an INSERT statement
+char* get_first_row_sample(const char *filename, long start_offset, const char *table_name);
 
 #endif // SQL_INDEXER_H

@@ -249,71 +249,64 @@ bool read_index_from_file(SqlIndex *index, const char *index_filename) {
     int read_count = 0;
 
     while (read_line_from_index(fp, line_buffer, sizeof(line_buffer))) {
-        read_count = sscanf(line_buffer, "%255[^,],%511[^,],%d", type_buffer, name_buffer, &line_number);
+        // Check for COLUMN lines first
+        if (strncmp(line_buffer, "COLUMN,", 7) == 0) {
+            // Parse column info: COLUMN,TABLE_NAME,COLUMN_NAME,TYPE,IS_PK,IS_NOT_NULL,IS_AUTO_INC,DEFAULT
+            char table_name[256], col_name[256], col_type[256], default_val[256];
+            bool is_pk, is_nn, is_ai;
+            int is_pk_int, is_nn_int, is_ai_int;
+            int vals_read = sscanf(line_buffer, "COLUMN,%255[^,],%255[^,],%255[^,],%d,%d,%d,%255[^\n]", 
+                                table_name, col_name, col_type, &is_pk_int, &is_nn_int, &is_ai_int, default_val);
+            is_pk = is_pk_int;
+            is_nn = is_nn_int;
+            is_ai = is_ai_int;
+            
+            // Ensure we read at least the table, column name, and type
+            if (vals_read >= 3 && strcmp(table_name, name_buffer) == 0) {
+                // Find the table entry we just added
+                IndexEntry *entry = &index->entries[index->count - 1];
+                if (entry->table_info == NULL) {
+                    // Should never happen if add_table_entry worked properly
+                    fprintf(stderr, "Error: Table entry has no table_info structure.\n");
+                    fclose(fp);
+                    cleanup_index(index);
+                    return false;
+                }
+                
+                // Add the column
+                if (!add_column_to_table(entry->table_info, col_name, col_type, 
+                                      is_pk, is_nn, is_ai, 
+                                      (vals_read >= 7 && default_val[0] != '\0') ? default_val : NULL)) {
+                    fprintf(stderr, "Error adding column info for %s.%s\n", name_buffer, col_name);
+                    fclose(fp);
+                    cleanup_index(index);
+                    return false;
+                }
+            } else {
+                // Malformed column line or different table
+                fprintf(stderr, "Warning: Malformed column entry in index file: %s\n", line_buffer);
+            }
+            continue; // Move to the next line
+        }
 
-        if (read_count == 3) {
+        // Parse main entry: TYPE,NAME,LINE[,END_OFFSET]
+        long end_offset = -1;
+        read_count = sscanf(line_buffer, "%255[^,],%511[^,],%d,%ld", type_buffer, name_buffer, &line_number, &end_offset);
+
+        if (read_count >= 3) { // Need at least TYPE, NAME, LINE
             if (strcmp(type_buffer, "TABLE") == 0) {
-                // For tables, use the specialized add function
                 if (!add_table_entry(index, name_buffer, line_number)) {
                     fprintf(stderr, "Error adding table entry while reading index file.\n");
                     fclose(fp);
                     cleanup_index(index);
                     return false;
                 }
-                
-                // Check for column entries that follow
-                char col_line[1024];
-                while (read_line_from_index(fp, col_line, sizeof(col_line))) {
-                    // Check if this is a COLUMN entry by looking for the prefix
-                    if (strncmp(col_line, "COLUMN,", 7) == 0) {
-                        // Parse column info: COLUMN,TABLE_NAME,COLUMN_NAME,TYPE,IS_PK,IS_NOT_NULL,IS_AUTO_INC,DEFAULT
-                        char table_name[256], col_name[256], col_type[256], default_val[256];
-                        bool is_pk, is_nn, is_ai;
-                        int is_pk_int, is_nn_int, is_ai_int;
-                        int vals_read = sscanf(col_line, "COLUMN,%255[^,],%255[^,],%255[^,],%d,%d,%d,%255[^\n]", 
-                                            table_name, col_name, col_type, &is_pk_int, &is_nn_int, &is_ai_int, default_val);
-                        is_pk = is_pk_int;
-                        is_nn = is_nn_int;
-                        is_ai = is_ai_int;
-                        
-                        // Ensure we read at least the table, column name, and type
-                        if (vals_read >= 3 && strcmp(table_name, name_buffer) == 0) {
-                            // Find the table entry we just added
-                            IndexEntry *entry = &index->entries[index->count - 1];
-                            if (entry->table_info == NULL) {
-                                // Should never happen if add_table_entry worked properly
-                                fprintf(stderr, "Error: Table entry has no table_info structure.\n");
-                                fclose(fp);
-                                cleanup_index(index);
-                                return false;
-                            }
-                            
-                            // Add the column
-                            if (!add_column_to_table(entry->table_info, col_name, col_type, 
-                                                  is_pk, is_nn, is_ai, 
-                                                  (vals_read >= 7 && default_val[0] != '\0') ? default_val : NULL)) {
-                                fprintf(stderr, "Error adding column info for %s.%s\n", name_buffer, col_name);
-                                fclose(fp);
-                                cleanup_index(index);
-                                return false;
-                            }
-                        } else {
-                            // Malformed column line or different table
-                            fprintf(stderr, "Warning: Malformed column entry in index file: %s\n", col_line);
-                        }
-                    } else {
-                        // Not a column entry, put the line back (rewind) and break out
-                        // We can't push back a whole line in ANSI C, so we have to use ungetc for each character
-                        size_t len = strlen(col_line);
-                        for (size_t i = len; i-- > 0; ) {
-                            ungetc(col_line[i], fp);
-                        }
-                        ungetc('\n', fp); // Put back the newline that was consumed
-                        break;
-                    }
+                // If end_offset was read (read_count == 4), store it
+                if (read_count == 4 && index->count > 0) {
+                    index->entries[index->count - 1].table_info->end_offset = end_offset;
                 }
             } else {
-                // For non-table entries, use the normal add function
+                // Non-table entry
                 if (!add_index_entry(index, type_buffer, name_buffer, line_number)) {
                     fprintf(stderr, "Error adding entry while reading index file.\n");
                     fclose(fp);
@@ -351,19 +344,17 @@ bool write_index_to_file(const SqlIndex *index, const char *index_filename) {
     }
 
     for (int i = 0; i < index->count; ++i) {
-        // Basic CSV-like format, no escaping of commas in type/name assumed for now
-        if (fprintf(fp, "%s,%s,%d\n", index->entries[i].type, index->entries[i].name, index->entries[i].line_number) < 0) {
-            perror("Error writing to index file");
-            fclose(fp);
-            // Optionally remove the partially written file
-            // remove(index_filename);
-            return false;
-        }
-        
-        // For table entries, also write column information
-        if (strcmp(index->entries[i].type, "TABLE") == 0 && 
-            index->entries[i].table_info != NULL) {
-            
+        // Write main entry
+        if (strcmp(index->entries[i].type, "TABLE") == 0 && index->entries[i].table_info) {
+            // Table entry: include end_offset
+            if (fprintf(fp, "%s,%s,%d,%ld\n", index->entries[i].type, index->entries[i].name, index->entries[i].line_number, index->entries[i].table_info->end_offset) < 0) {
+                perror("Error writing to index file");
+                fclose(fp);
+                // Optionally remove the partially written file
+                // remove(index_filename);
+                return false;
+            }
+            // Write column information for this table
             TableInfo *table = index->entries[i].table_info;
             for (int j = 0; j < table->column_count; j++) {
                 ColumnInfo *col = &table->columns[j];
@@ -378,6 +369,15 @@ bool write_index_to_file(const SqlIndex *index, const char *index_filename) {
                     fclose(fp);
                     return false;
                 }
+            }
+        } else {
+            // Non-table entry: TYPE,NAME,LINE
+            if (fprintf(fp, "%s,%s,%d\n", index->entries[i].type, index->entries[i].name, index->entries[i].line_number) < 0) {
+                perror("Error writing to index file");
+                fclose(fp);
+                // Optionally remove the partially written file
+                // remove(index_filename);
+                return false;
             }
         }
     }
@@ -497,6 +497,7 @@ static bool add_table_entry(SqlIndex *index, const char *name, int line_number) 
     table_info->column_count = 0;
     table_info->column_capacity = 0;
     table_info->line_number = line_number;
+    table_info->end_offset = -1; // Initialize end_offset
     
     // Now populate the entry
     index->entries[index->count].type = type_copy;
@@ -605,6 +606,9 @@ static size_t process_chunk(ParsingContext *ctx) {
                                     
                                     // If we can find both the start and end, parse the columns
                                     if (table_body_end) {
+                                        // Store the global offset after the CREATE TABLE definition
+                                        table_info->end_offset = ctx->global_offset + (table_body_end - chunk_start);
+
                                         // Parse column definitions
                                         if (!parse_table_columns(ctx, table_info, table_body_start, table_body_end)) {
                                             fprintf(stderr, "Warning: Failed to parse columns for table '%s'\n", table_name);
@@ -615,10 +619,13 @@ static size_t process_chunk(ParsingContext *ctx) {
                                         ptr = table_body_end;
                                     } else {
                                         // Just move past the table name and opening bracket
-                                        ptr = table_body_start;
+                                        const char* offset_ptr = table_body_start ? table_body_start : token_start + token_len;
+                                        table_info->end_offset = ctx->global_offset + (offset_ptr - chunk_start);
+                                        ptr = offset_ptr;
                                     }
                                 } else {
                                     // Move just past the table name
+                                    ctx->index.entries[ctx->index.count - 1].table_info->end_offset = ctx->global_offset + (token_start + token_len - chunk_start);
                                     ptr = token_start + token_len;
                                 }
                                 
@@ -835,4 +842,165 @@ static size_t get_token_length(const char *token_start) {
         ptr++;
     }
     return ptr - token_start;
+}
+
+// --- New Function: Get First Row Sample ---
+
+// Reads from the SQL file starting at a given offset to find the first row
+// of an INSERT statement for the specified table.
+// Returns a dynamically allocated string with the sample (up to 300 chars or "BLOB"),
+// or NULL on error or if not found.
+// Caller must free the returned string.
+char* get_first_row_sample(const char *filename, long start_offset, const char *table_name) {
+    if (start_offset < 0 || !filename || !table_name) {
+        return NULL;
+    }
+
+    FILE *fp = fopen(filename, "rb");
+    if (!fp) {
+        perror("get_first_row_sample: Error opening file");
+        return NULL;
+    }
+
+    if (fseek(fp, start_offset, SEEK_SET) != 0) {
+        perror("get_first_row_sample: Error seeking in file");
+        fclose(fp);
+        return NULL;
+    }
+
+    char buffer[CHUNK_SIZE + 1]; // Read buffer
+    char insert_pattern[512];
+    // Create two common patterns (with and without backticks)
+    snprintf(insert_pattern, sizeof(insert_pattern), "INSERT INTO `%s` VALUES (", table_name);
+    char insert_pattern_no_ticks[512];
+    snprintf(insert_pattern_no_ticks, sizeof(insert_pattern), "INSERT INTO %s VALUES (", table_name);
+
+    size_t pattern_len = strlen(insert_pattern);
+    size_t pattern_no_ticks_len = strlen(insert_pattern_no_ticks);
+    size_t bytes_read;
+    char *found_pattern = NULL;
+    size_t found_pattern_len = 0;
+    long current_offset = start_offset;
+    char *sample = NULL;
+
+    // Read chunks until INSERT is found or EOF
+    while ((bytes_read = fread(buffer, 1, CHUNK_SIZE, fp)) > 0) {
+        buffer[bytes_read] = '\0'; // Null-terminate the buffer
+
+        // Search for the INSERT patterns (case-insensitive for keywords)
+        char *search_start = buffer;
+        while (search_start < buffer + bytes_read) {
+            // Skip leading whitespace/comments (basic skip)
+            while (search_start < buffer + bytes_read && (isspace(*search_start) || *search_start == '-' || *search_start == '/')) {
+                 // Basic comment skip - might need improvement
+                 if (*search_start == '-' && search_start + 1 < buffer + bytes_read && *(search_start+1) == '-') {
+                     char *eol = strchr(search_start, '\n');
+                     if (eol) search_start = eol + 1; else search_start = buffer + bytes_read;
+                 } else if (*search_start == '/' && search_start + 1 < buffer + bytes_read && *(search_start+1) == '*') {
+                     char *end_comment = strstr(search_start + 2, "*/");
+                     if (end_comment) search_start = end_comment + 2; else search_start = buffer + bytes_read; // Assume comment extends beyond buffer
+                 } else {
+                     search_start++;
+                 }
+            }
+            if (search_start >= buffer + bytes_read) break;
+
+            // Check for patterns
+            if (strncasecmp(search_start, "INSERT INTO", 11) == 0) {
+                 // Found potential start, now check table name and VALUES
+                 const char* after_insert = search_start + 11;
+                 while (isspace(*after_insert)) after_insert++;
+
+                 bool match = false;
+                 if (*after_insert == '`' && strncmp(after_insert + 1, table_name, strlen(table_name)) == 0 && *(after_insert + 1 + strlen(table_name)) == '`') {
+                     // Match with backticks
+                     const char* after_table = after_insert + 1 + strlen(table_name) + 1;
+                     while (isspace(*after_table)) after_table++;
+                     if (strncasecmp(after_table, "VALUES", 6) == 0) {
+                         const char* after_values = after_table + 6;
+                         while (isspace(*after_values)) after_values++;
+                         if (*after_values == '(') {
+                             found_pattern = (char*)after_values + 1; // Start of row data
+                             match = true;
+                         }
+                     }
+                 } else if (strncmp(after_insert, table_name, strlen(table_name)) == 0) {
+                     // Match without backticks
+                     const char* after_table = after_insert + strlen(table_name);
+                     while (isspace(*after_table)) after_table++;
+                     if (strncasecmp(after_table, "VALUES", 6) == 0) {
+                         const char* after_values = after_table + 6;
+                         while (isspace(*after_values)) after_values++;
+                         if (*after_values == '(') {
+                             found_pattern = (char*)after_values + 1; // Start of row data
+                             match = true;
+                         }
+                     }
+                 }
+
+                 if (match) break; // Found the correct INSERT
+            }
+            // Move to next potential start (e.g., next line or just next char)
+            char *next_line = strchr(search_start, '\n');
+            search_start = next_line ? next_line + 1 : buffer + bytes_read;
+        }
+
+        if (found_pattern) break; // Exit outer loop if found
+
+        current_offset += bytes_read;
+        // Need logic to handle patterns split across buffer boundaries (more complex)
+    }
+
+    if (found_pattern) {
+        // Found the start of the first row data
+        const char *row_start = found_pattern;
+        const char *row_end = NULL;
+        int paren_depth = 1; // Already inside the first opening parenthesis
+        bool in_string = false;
+        char string_quote = 0;
+
+        // Find the closing parenthesis for *this* row, respecting strings
+        const char *p = row_start;
+        const char *buffer_end = buffer + bytes_read; // End of current buffer
+        while (p < buffer_end) {
+            if (!in_string && (*p == '\'' || *p == '"' || *p == '`') && (p == row_start || *(p-1) != '\\')) {
+                in_string = true;
+                string_quote = *p;
+            } else if (in_string && *p == string_quote && (p == row_start || *(p-1) != '\\')) {
+                in_string = false;
+            }
+            else if (!in_string) {
+                if (*p == '(') paren_depth++;
+                else if (*p == ')') {
+                    paren_depth--;
+                    if (paren_depth == 0) {
+                        row_end = p;
+                        break;
+                    }
+                }
+            }
+            p++;
+        }
+        // TODO: Handle rows split across buffer boundaries
+
+        if (row_end) {
+            size_t row_len = row_end - row_start;
+            // Check for _binary prefix (case-insensitive? Assuming case-sensitive here)
+            if (strncmp(row_start, "_binary ", 8) == 0) {
+                 sample = strdup("BLOB");
+            } else {
+                size_t sample_len = row_len < 300 ? row_len : 300;
+                sample = malloc(sample_len + 1);
+                if (sample) {
+                    strncpy(sample, row_start, sample_len);
+                    sample[sample_len] = '\0';
+                } else {
+                    perror("get_first_row_sample: Failed to allocate memory for sample");
+                }
+            }
+        }
+    }
+
+    fclose(fp);
+    return sample;
 }
