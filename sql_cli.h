@@ -2,7 +2,7 @@
 #define SQL_CLI_H
 
 #include "sql_indexer.h"
-#include <ncurses.h>
+#include <ncursesw/ncurses.h>
 
 typedef struct {
     WINDOW *main_win;
