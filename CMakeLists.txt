@@ -6,6 +6,7 @@ project(sql_indexer C)
 # Add the executable with main.c and sql_indexer.c
 # Find ncurses library
 find_package(Curses REQUIRED)
+include_directories(${CURSES_INCLUDE_DIRS})
 
 add_executable(sql_indexer
     main.c
@@ -14,7 +15,10 @@ add_executable(sql_indexer
     sql_cli.c
 )
 
-target_include_directories(sql_indexer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(sql_indexer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CURSES_INCLUDE_DIRS}
+)
 target_link_libraries(sql_indexer ${CURSES_LIBRARIES})
 
 # Optional: Specify C standard if needed
