@@ -1,4 +1,5 @@
 #include "sql_indexer.h"
+#include "sql_cli.h"
 #include <stdio.h>
 #include <stdlib.h> // For EXIT_FAILURE, EXIT_SUCCESS
 
@@ -39,7 +40,14 @@ int main(int argc, char *argv[]) {
 
     // Print results even if there were non-fatal errors during processing
     if (success || !ctx.error_occurred) { // Print if processing completed or error was non-fatal
-        print_results(&ctx.index);
+        // Start interactive CLI
+        CLI_Context *cli = init_cli(&ctx.index);
+        if (cli) {
+            run_cli(cli);
+            cleanup_cli(cli);
+        } else {
+            print_results(&ctx.index);
+        }
     }
 
     // Clean up resources
