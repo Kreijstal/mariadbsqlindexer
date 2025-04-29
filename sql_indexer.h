@@ -67,4 +67,9 @@ bool process_sql_file(ParsingContext *ctx);
 // Print the indexed results
 void print_results(const TableIndex *index);
 
+// Index file operations
+bool save_index_to_file(const TableIndex *index, const char *sql_filename);
+bool load_index_from_file(TableIndex *index, const char *sql_filename);
+bool index_file_exists(const char *sql_filename);
+
 #endif // SQL_INDEXER_H

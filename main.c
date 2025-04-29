@@ -17,8 +17,25 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Process the file
-    bool success = process_sql_file(&ctx);
+    // Check if index file exists
+    bool success;
+    if (index_file_exists(filename)) {
+        // Load existing index
+        success = load_index_from_file(&ctx.index, filename);
+        if (!success) {
+            fprintf(stderr, "Failed to load index from file, falling back to processing\n");
+            success = process_sql_file(&ctx);
+        }
+    } else {
+        // Process the file and create new index
+        success = process_sql_file(&ctx);
+        if (success) {
+            // Save index for future use
+            if (!save_index_to_file(&ctx.index, filename)) {
+                fprintf(stderr, "Warning: Failed to save index to file\n");
+            }
+        }
+    }
 
     // Print results even if there were non-fatal errors during processing
     if (success || !ctx.error_occurred) { // Print if processing completed or error was non-fatal

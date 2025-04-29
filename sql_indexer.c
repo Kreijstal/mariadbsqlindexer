@@ -55,6 +55,19 @@ bool initialize_context(ParsingContext *ctx, const char *filename) {
     return true;
 }
 
+// Helper to clean up just the index part
+static void cleanup_context_index(TableIndex *index) {
+    if (index->entries) {
+        for (size_t i = 0; i < index->count; ++i) {
+            free(index->entries[i].name);
+        }
+        free(index->entries);
+        index->entries = NULL;
+    }
+    index->count = 0;
+    index->capacity = 0;
+}
+
 // Free resources held by the context
 void cleanup_context(ParsingContext *ctx) {
     if (ctx->fp) {
@@ -428,6 +441,155 @@ static bool is_keyword_boundary(char char_before, char char_after) {
     if (!start_ok) return false;
     bool end_ok = (char_after == '\0' || isspace((unsigned char)char_after) || char_after == '(');
     return end_ok;
+}
+
+// Check if index file exists for given SQL file
+bool index_file_exists(const char *sql_filename) {
+    char index_filename[1024];
+    snprintf(index_filename, sizeof(index_filename), "%s.index", sql_filename);
+    FILE *fp = fopen(index_filename, "rb");
+    if (fp) {
+        fclose(fp);
+        return true;
+    }
+    return false;
+}
+
+// Save index to file
+bool save_index_to_file(const TableIndex *index, const char *sql_filename) {
+    char index_filename[1024];
+    snprintf(index_filename, sizeof(index_filename), "%s.index", sql_filename);
+    
+    FILE *fp = fopen(index_filename, "wb");
+    if (!fp) {
+        perror("Failed to open index file for writing");
+        return false;
+    }
+
+    // Write header with version and count
+    const char header[] = "SQLIDX1";
+    if (fwrite(header, 1, sizeof(header)-1, fp) != sizeof(header)-1) {
+        perror("Failed to write header");
+        fclose(fp);
+        return false;
+    }
+
+    // Write entry count
+    if (fwrite(&index->count, sizeof(size_t), 1, fp) != 1) {
+        perror("Failed to write entry count");
+        fclose(fp);
+        return false;
+    }
+
+    // Write each entry
+    for (size_t i = 0; i < index->count; i++) {
+        const TableEntry *entry = &index->entries[i];
+        
+        // Write fixed-size fields
+        if (fwrite(&entry->offset, sizeof(entry->offset), 1, fp) != 1 ||
+            fwrite(&entry->line, sizeof(entry->line), 1, fp) != 1 ||
+            fwrite(&entry->column, sizeof(entry->column), 1, fp) != 1) {
+            perror("Failed to write entry data");
+            fclose(fp);
+            return false;
+        }
+
+        // Write name length and name
+        size_t name_len = strlen(entry->name);
+        if (fwrite(&name_len, sizeof(size_t), 1, fp) != 1 ||
+            fwrite(entry->name, 1, name_len, fp) != name_len) {
+            perror("Failed to write name data");
+            fclose(fp);
+            return false;
+        }
+    }
+
+    fclose(fp);
+    return true;
+}
+
+// Load index from file
+bool load_index_from_file(TableIndex *index, const char *sql_filename) {
+    char index_filename[1024];
+    snprintf(index_filename, sizeof(index_filename), "%s.index", sql_filename);
+    
+    FILE *fp = fopen(index_filename, "rb");
+    if (!fp) {
+        perror("Failed to open index file for reading");
+        return false;
+    }
+
+    // Read and verify header
+    char header[8];
+    if (fread(header, 1, sizeof(header)-1, fp) != sizeof(header)-1 ||
+        memcmp(header, "SQLIDX1", sizeof(header)-1) != 0) {
+        fprintf(stderr, "Invalid index file format\n");
+        fclose(fp);
+        return false;
+    }
+
+    // Read entry count
+    size_t count;
+    if (fread(&count, sizeof(size_t), 1, fp) != 1) {
+        perror("Failed to read entry count");
+        fclose(fp);
+        return false;
+    }
+
+    // Initialize index
+    index->entries = malloc(count * sizeof(TableEntry));
+    if (!index->entries) {
+        perror("Failed to allocate memory for index entries");
+        fclose(fp);
+        return false;
+    }
+    index->count = 0;
+    index->capacity = count;
+
+    // Read each entry
+    for (size_t i = 0; i < count; i++) {
+        TableEntry *entry = &index->entries[i];
+        
+        // Read fixed-size fields
+        if (fread(&entry->offset, sizeof(entry->offset), 1, fp) != 1 ||
+            fread(&entry->line, sizeof(entry->line), 1, fp) != 1 ||
+            fread(&entry->column, sizeof(entry->column), 1, fp) != 1) {
+            perror("Failed to read entry data");
+            cleanup_context_index(index);
+            fclose(fp);
+            return false;
+        }
+
+        // Read name length and name
+        size_t name_len;
+        if (fread(&name_len, sizeof(size_t), 1, fp) != 1) {
+            perror("Failed to read name length");
+            cleanup_context_index(index);
+            fclose(fp);
+            return false;
+        }
+
+        entry->name = malloc(name_len + 1);
+        if (!entry->name) {
+            perror("Failed to allocate memory for table name");
+            cleanup_context_index(index);
+            fclose(fp);
+            return false;
+        }
+
+        if (fread(entry->name, 1, name_len, fp) != name_len) {
+            perror("Failed to read name data");
+            free(entry->name);
+            cleanup_context_index(index);
+            fclose(fp);
+            return false;
+        }
+        entry->name[name_len] = '\0';
+        index->count++;
+    }
+
+    fclose(fp);
+    return true;
 }
 
 // Print the indexed results
