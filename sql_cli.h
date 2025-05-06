@@ -2,23 +2,19 @@
 #define SQL_CLI_H
 
 #include "sql_indexer.h"
-#include <ncursesw/ncurses.h>
 
 typedef struct {
-    WINDOW *main_win;
-    WINDOW *table_win;
-    WINDOW *info_win;
     int selected_table;
     TableIndex *index;
 } CLI_Context;
 
-// Initialize ncurses interface
+// Initialize CLI interface
 CLI_Context* init_cli(TableIndex *index);
 
-// Run the main CLI loop
+// Run the main REPL loop
 void run_cli(CLI_Context *ctx);
 
-// Clean up ncurses resources
+// Clean up CLI resources
 void cleanup_cli(CLI_Context *ctx);
 
 #endif // SQL_CLI_H
