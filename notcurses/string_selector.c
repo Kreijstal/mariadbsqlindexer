@@ -4,6 +4,8 @@
 #include <wchar.h>        // For wcwidth, wcswidth - MUST BE EARLY
 
 #include <notcurses/notcurses.h>
+#include <unistd.h> // for isatty()
+#include <stdlib.h> // for getenv()
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,16 +120,36 @@ int main(void) {
     AppState app_state = {0};
     app_state.selected_idx = 0;
     app_state.scroll_offset = 0;
-    
-    struct notcurses_options opts = {0};
-    opts.flags = NCOPTION_NO_ALTERNATE_SCREEN | NCOPTION_NO_QUIT_SIGHANDLERS | NCOPTION_SUPPRESS_BANNERS;
-    // For more detailed logs from notcurses itself, you could try:
-    opts.loglevel = NCLOGLEVEL_TRACE; // or NCLOGLEVEL_DEBUG, NCLOGLEVEL_INFO
-    opts.logfp = stderr; // Direct notcurses logs to stderr
 
+    // Check and set TERM environment variable if not set
+    if(!getenv("TERM")) {
+        fprintf(stderr, "WARNING: TERM environment variable not set, defaulting to 'xterm-256color'\n");
+        setenv("TERM", "xterm-256color", 1);
+    }
+
+    fprintf(stderr, "Initializing notcurses...\n");
+    fprintf(stderr, "TERM=%s\n", getenv("TERM"));
+
+    struct notcurses_options opts = {0};
+    opts.flags = NCOPTION_NO_ALTERNATE_SCREEN
+               | NCOPTION_NO_QUIT_SIGHANDLERS;
+    opts.loglevel = NCLOGLEVEL_WARNING;
+
+    fprintf(stderr, "DEBUG: Options configured:\n");
+    fprintf(stderr, "  flags: 0x%x\n", opts.flags);
+    fprintf(stderr, "  loglevel: %d\n", opts.loglevel);
+    
+    const char* term = getenv("TERM");
+    fprintf(stderr, "DEBUG: TERM environment variable: %s\n", term ? term : "(not set)");
+    
     fprintf(stderr, "Main: Initializing notcurses...\n");
     app_state.nc = notcurses_init(&opts, NULL);
+    fprintf(stderr, "DEBUG: notcurses_init returned %p\n", app_state.nc);
     if (!app_state.nc) {
+        fprintf(stderr, "ERROR: notcurses_init failed. Possible causes:\n");
+        fprintf(stderr, "1. No terminal available (are you running in a proper terminal?)\n");
+        fprintf(stderr, "2. TERM environment variable not set correctly\n");
+        fprintf(stderr, "3. Terminfo database not found (try 'export TERM=xterm-256color')\n");
         fprintf(stderr, "Main: notcurses_init failed!\n");
         return EXIT_FAILURE;
     }
