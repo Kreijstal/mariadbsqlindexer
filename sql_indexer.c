@@ -8,6 +8,23 @@
 #include <strings.h> // Include for strncasecmp
 #include <cjson/cJSON.h>
 
+#if defined(_WIN32) || defined(_WIN64) || defined(__MSYS__)
+// Windows/MSYS2 doesn't have strcasestr, so we provide one.
+// This is a simple implementation using strncasecmp.
+char *strcasestr(const char *haystack, const char *needle) {
+    if (!needle || *needle == '\0') {
+        return (char *)haystack;
+    }
+    size_t needle_len = strlen(needle);
+    for (; *haystack; ++haystack) {
+        if (strncasecmp(haystack, needle, needle_len) == 0) {
+            return (char *)haystack;
+        }
+    }
+    return NULL;
+}
+#endif
+
 // --- Constants ---
 const char *CREATE_TABLE_KEYWORD = "CREATE TABLE";
 const size_t CREATE_TABLE_LEN = 12; // strlen("CREATE TABLE")
