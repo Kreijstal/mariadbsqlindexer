@@ -62,6 +62,7 @@ typedef struct {
 } IndexEntry;
 
 typedef struct {
+    char sql_file_sha256[65]; // 64 hex chars + null terminator
     IndexEntry *entries;
     int count;
     int capacity;
@@ -95,7 +96,8 @@ bool process_sql_file(ParsingContext *ctx);
 void print_results(const SqlIndex *index);
 void cleanup_index(SqlIndex *index); // Function to clean up only the index structure
 bool read_index_from_file(SqlIndex *index, const char *index_filename); // Function to read index from file
-bool write_index_to_file(const SqlIndex *index, const char *index_filename); // Function to write index to file
+// If sql_file_sha256 is not NULL, it will be written to the index file.
+bool write_index_to_file(const SqlIndex *index, const char *index_filename, const char *sql_file_sha256);
 
 // Function to display interactive table selection and column display
 void display_table_columns_ui(SqlIndex *index);

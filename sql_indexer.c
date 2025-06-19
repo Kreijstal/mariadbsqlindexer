@@ -26,7 +26,32 @@ static bool add_column_to_table(TableInfo *table_info, const char *name, const c
 static const char* find_table_body_start(const char *ptr, const char *end);
 static const char* find_table_body_end(const char *ptr, const char *end);
 static void cleanup_table_info(TableInfo *table_info);
+static bool calculate_sha256(const char *filename, char *hash_buffer);
 
+// --- SHA256 Calculation ---
+// Calculates the SHA256 hash of a file using the `sha256sum` command.
+// Returns true on success and populates the `hash_buffer` (must be 65 bytes).
+// Returns false on failure.
+static bool calculate_sha256(const char *filename, char *hash_buffer) {
+    char command[1024];
+    snprintf(command, sizeof(command), "sha256sum %s", filename);
+
+    FILE *pipe = popen(command, "r");
+    if (!pipe) {
+        perror("popen() failed");
+        return false;
+    }
+
+    if (fread(hash_buffer, 1, 64, pipe) != 64) {
+        fprintf(stderr, "Error reading SHA256 from pipe.\n");
+        pclose(pipe);
+        return false;
+    }
+    hash_buffer[64] = '\0'; // Null-terminate the hash string
+
+    pclose(pipe);
+    return true;
+}
 // --- Function Implementations ---
 
 bool initialize_context(ParsingContext *ctx, const char *filename) {
@@ -50,7 +75,7 @@ bool initialize_context(ParsingContext *ctx, const char *filename) {
     ctx->current_line = 1;
     ctx->last_newline_offset = -1; // Start before the file begins
     ctx->state = STATE_CODE;
-    ctx->index = (SqlIndex){NULL, 0, 0}; // Use SqlIndex, correct initialization
+    ctx->index = (SqlIndex){"", NULL, 0, 0}; // Use SqlIndex, correct initialization
     ctx->error_occurred = false;
 
     return true;
@@ -241,8 +266,21 @@ bool read_index_from_file(SqlIndex *index, const char *index_filename) {
     index->entries = NULL;
     index->count = 0;
     index->capacity = 0;
+    memset(index->sql_file_sha256, 0, sizeof(index->sql_file_sha256));
 
     char line_buffer[1024]; // Buffer for reading lines
+
+    // Read the SHA256 hash from the first line
+    if (read_line_from_index(fp, line_buffer, sizeof(line_buffer))) {
+        if (strncmp(line_buffer, "SHA256:", 7) == 0) {
+            strncpy(index->sql_file_sha256, line_buffer + 7, 64);
+            index->sql_file_sha256[64] = '\0';
+        } else {
+            fprintf(stderr, "Warning: Index file does not contain SHA256 hash.\n");
+            // Rewind to process the line as a regular entry
+            fseek(fp, 0, SEEK_SET);
+        }
+    }
     char type_buffer[256];
     char name_buffer[512];
     int line_number;
@@ -336,11 +374,20 @@ bool read_index_from_file(SqlIndex *index, const char *index_filename) {
     return true;
 }
 
-bool write_index_to_file(const SqlIndex *index, const char *index_filename) {
+bool write_index_to_file(const SqlIndex *index, const char *index_filename, const char *sql_file_sha256) {
     FILE *fp = fopen(index_filename, "w");
     if (!fp) {
         perror("Error opening index file for writing");
         return false;
+    }
+
+    // Write SHA256 hash if provided
+    if (sql_file_sha256) {
+        if (fprintf(fp, "SHA256:%s\n", sql_file_sha256) < 0) {
+            perror("Error writing SHA256 to index file");
+            fclose(fp);
+            return false;
+        }
     }
 
     for (int i = 0; i < index->count; ++i) {

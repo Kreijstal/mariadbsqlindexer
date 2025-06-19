@@ -8,32 +8,34 @@
 // --- Global Verbose Flag Definition ---
 bool verbose_mode = false;
 
+// --- Static Helper Function Declarations ---
+static bool command_exists(const char *command);
+static bool calculate_sha256_main(const char *filename, char *hash_buffer);
+
 // Function to print usage instructions
 void print_usage(const char *prog_name) {
     fprintf(stderr, "Usage: %s [-v] <sql_file>\n", prog_name);
     fprintf(stderr, "  <sql_file> : Path to the SQL file to process.\n");
     fprintf(stderr, "  -v         : Enable verbose debug messages.\n");
-    fprintf(stderr, "               Automatically loads '<sql_file>.index' if it exists.\n");
+    fprintf(stderr, "               Automatically loads '<sql_file>.index' if it exists and SHA256 matches.\n");
     fprintf(stderr, "               Automatically saves index to '<sql_file>.index' after parsing.\n");
 }
 
 int main(int argc, char *argv[]) {
     const char *sql_filename = NULL;
     char *index_filename = NULL; // Dynamically allocated
-    const char *load_index_filename = NULL; // Points to index_filename if loading
-    const char *output_index_filename = NULL; // Points to index_filename if saving
+    bool load_from_index = false;
+    bool write_to_index = false;
 
     // --- Argument Parsing ---
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             verbose_mode = true;
-            // Delay DEBUG_PRINT until after all args parsed
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
             print_usage(argv[0]);
             return 1;
         } else {
-            // Assume it's the SQL filename
             if (sql_filename == NULL) {
                 sql_filename = argv[i];
             } else {
@@ -44,19 +46,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Now that parsing is done, we can use DEBUG_PRINT
     if (verbose_mode) {
         DEBUG_PRINT("Verbose mode enabled.");
     }
 
-    // Check if SQL file is provided
     if (sql_filename == NULL) {
         fprintf(stderr, "Error: SQL file path is required.\n");
         print_usage(argv[0]);
         return 1;
     }
 
-    // --- Determine Index Filename and Action ---
+    // --- Determine Index Filename ---
     size_t sql_len = strlen(sql_filename);
     index_filename = malloc(sql_len + 7); // + ".index" + null terminator
     if (!index_filename) {
@@ -65,36 +65,50 @@ int main(int argc, char *argv[]) {
     }
     sprintf(index_filename, "%s.index", sql_filename);
 
-    // Check if the index file exists using access() from unistd.h
-    if (access(index_filename, F_OK) == 0) {
-        // File exists, try to load it
-        load_index_filename = index_filename;
-        DEBUG_PRINT("Index file '%s' exists. Attempting to load.", index_filename);
-    } else {
-        // File does not exist, parse SQL and save index
-        output_index_filename = index_filename;
-        DEBUG_PRINT("Index file '%s' not found. Will parse SQL and save index.", index_filename);
-    }
-
-
-    DEBUG_PRINT("SQL file: %s", sql_filename);
-    DEBUG_PRINT("Index file: %s (%s)", index_filename, load_index_filename ? "load" : "save");
-
-
-    ParsingContext ctx = {0}; // Initialize context
-    SqlIndex index = {0}; // Initialize index separately
+    ParsingContext ctx = {0};
+    SqlIndex index = {0};
     bool success = true;
 
-    if (load_index_filename) {
-        DEBUG_PRINT("Loading index from %s", load_index_filename);
-        if (!read_index_from_file(&index, load_index_filename)) {
-            fprintf(stderr, "Error loading index file '%s'.\n", load_index_filename);
-            success = false;
+    // --- Index Loading/Parsing Logic ---
+    bool sha256_support = command_exists("sha256sum");
+    char current_sha[65] = {0};
+
+    if (!sha256_support) {
+        fprintf(stderr, "Warning: 'sha256sum' command not found. Skipping hash verification.\n");
+    }
+
+    if (access(index_filename, F_OK) == 0) {
+        DEBUG_PRINT("Index file '%s' exists. Attempting to load.", index_filename);
+        if (read_index_from_file(&index, index_filename)) {
+            if (sha256_support && index.sql_file_sha256[0] != '\0') {
+                if (calculate_sha256_main(sql_filename, current_sha)) {
+                    if (strcmp(index.sql_file_sha256, current_sha) == 0) {
+                        DEBUG_PRINT("SHA256 match. Using existing index.");
+                        load_from_index = true;
+                    } else {
+                        DEBUG_PRINT("SHA256 mismatch. Re-parsing SQL file.");
+                        cleanup_index(&index);
+                        write_to_index = true;
+                    }
+                } else {
+                    fprintf(stderr, "Warning: Could not calculate SHA256 for '%s'. Re-parsing.\n", sql_filename);
+                    cleanup_index(&index);
+                    write_to_index = true;
+                }
+            } else {
+                 DEBUG_PRINT("No SHA256 in index or sha256sum not supported. Using index without verification.");
+                 load_from_index = true;
+            }
         } else {
-             DEBUG_PRINT("Index loaded successfully. Count: %d", index.count);
+            fprintf(stderr, "Error loading index file '%s'. Re-parsing.\n", index_filename);
+            write_to_index = true;
         }
     } else {
-        // No index file to load, parse the SQL file
+        DEBUG_PRINT("Index file '%s' not found. Will parse SQL and save index.", index_filename);
+        write_to_index = true;
+    }
+
+    if (!load_from_index) {
         DEBUG_PRINT("Initializing context for parsing %s", sql_filename);
         if (!initialize_context(&ctx, sql_filename)) {
             fprintf(stderr, "Error initializing context for file '%s'.\n", sql_filename);
@@ -106,26 +120,24 @@ int main(int argc, char *argv[]) {
                 success = false;
             } else {
                 DEBUG_PRINT("File processing finished. Index count: %d", ctx.index.count);
-                // Move the index from context to the separate index variable
                 index = ctx.index;
-                // Prevent cleanup_context from freeing the index we just moved
-                ctx.index.entries = NULL;
+                ctx.index.entries = NULL; // Prevent double free
                 ctx.index.count = 0;
                 ctx.index.capacity = 0;
 
-                // Save the newly created index if output_index_filename is set
-                if (output_index_filename) {
-                    DEBUG_PRINT("Writing index to %s", output_index_filename);
-                    if (!write_index_to_file(&index, output_index_filename)) {
-                        fprintf(stderr, "Error writing index file '%s'.\n", output_index_filename);
-                        // Continue even if writing fails, maybe user wants to see output
+                if (write_to_index) {
+                    DEBUG_PRINT("Writing index to %s", index_filename);
+                    // Calculate hash only if supported and not already calculated
+                    if (sha256_support && current_sha[0] == '\0') {
+                        calculate_sha256_main(sql_filename, current_sha);
+                    }
+                    if (!write_index_to_file(&index, index_filename, sha256_support ? current_sha : NULL)) {
+                        fprintf(stderr, "Error writing index file '%s'.\n", index_filename);
                     } else {
                         DEBUG_PRINT("Index written successfully.");
                     }
                 }
             }
-            // Cleanup context (file handle, buffer) regardless of success
-            DEBUG_PRINT("Cleaning up parsing context.");
             cleanup_context(&ctx);
         }
     }
@@ -160,4 +172,34 @@ int main(int argc, char *argv[]) {
 
     DEBUG_PRINT("Exiting %s.", success ? "successfully" : "with errors");
     return success ? 0 : 1;
+}
+
+// --- Static Helper Function Implementations ---
+
+// Checks if a command exists in the system's PATH.
+static bool command_exists(const char *command) {
+    char check_command[256];
+    snprintf(check_command, sizeof(check_command), "command -v %s >/dev/null 2>&1", command);
+    return system(check_command) == 0;
+}
+
+// Calculates the SHA256 hash of a file using the `sha256sum` command.
+static bool calculate_sha256_main(const char *filename, char *hash_buffer) {
+    char command[1024];
+    snprintf(command, sizeof(command), "sha256sum \"%s\"", filename);
+
+    FILE *pipe = popen(command, "r");
+    if (!pipe) {
+        perror("popen() failed");
+        return false;
+    }
+
+    if (fscanf(pipe, "%64s", hash_buffer) != 1) {
+        fprintf(stderr, "Error reading SHA256 from pipe.\n");
+        pclose(pipe);
+        return false;
+    }
+
+    pclose(pipe);
+    return true;
 }
