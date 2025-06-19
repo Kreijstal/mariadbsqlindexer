@@ -108,6 +108,9 @@ bool parse_table_columns(ParsingContext *ctx, TableInfo *table_info, const char 
 // Function to get a sample of the first data row from an INSERT statement
 char* get_first_row_sample(const char *filename, long start_offset, const char *table_name);
 
+// Calculates the SHA256 hash of a file.
+bool calculate_sha256(const char *filename, char *hash_buffer);
+
 #endif // SQL_INDEXER_H
 
 // Dumps a specific table's data to a JSON file.

@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.10)
 project(sql_indexer C)
 
 # Add the executable with main.c and sql_indexer.c
-add_executable(sql_indexer main.c sql_indexer.c)
+add_executable(sql_indexer main.c sql_indexer.c sha256.c)
 
 # Optional: Specify C standard if needed
 set(CMAKE_C_STANDARD 11)

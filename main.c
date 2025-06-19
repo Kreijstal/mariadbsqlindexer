@@ -9,16 +9,16 @@
 bool verbose_mode = false;
 
 // --- Static Helper Function Declarations ---
-static bool command_exists(const char *command);
-static bool calculate_sha256_main(const char *filename, char *hash_buffer);
-
 // Function to print usage instructions
 void print_usage(const char *prog_name) {
-    fprintf(stderr, "Usage: %s [-v] <sql_file>\n", prog_name);
-    fprintf(stderr, "  <sql_file> : Path to the SQL file to process.\n");
-    fprintf(stderr, "  -v         : Enable verbose debug messages.\n");
-    fprintf(stderr, "               Automatically loads '<sql_file>.index' if it exists and SHA256 matches.\n");
-    fprintf(stderr, "               Automatically saves index to '<sql_file>.index' after parsing.\n");
+    fprintf(stderr, "Usage: %s [-v] [--dump-table <name>] <sql_file>\n", prog_name);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  <sql_file>        : Path to the SQL file to process.\n");
+    fprintf(stderr, "  -v, --verbose     : Enable verbose debug messages.\n");
+    fprintf(stderr, "  --dump-table <name> : Dump a specific table to JSON and exit.\n\n");
+    fprintf(stderr, "Indexing Behavior:\n");
+    fprintf(stderr, "  - Automatically loads '<sql_file>.index' if it exists and SHA256 matches.\n");
+    fprintf(stderr, "  - Automatically saves index to '<sql_file>.index' after parsing.\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -78,18 +78,13 @@ int main(int argc, char *argv[]) {
     bool success = true;
 
     // --- Index Loading/Parsing Logic ---
-    bool sha256_support = command_exists("sha256sum");
     char current_sha[65] = {0};
-
-    if (!sha256_support) {
-        fprintf(stderr, "Warning: 'sha256sum' command not found. Skipping hash verification.\n");
-    }
 
     if (access(index_filename, F_OK) == 0) {
         DEBUG_PRINT("Index file '%s' exists. Attempting to load.", index_filename);
         if (read_index_from_file(&index, index_filename)) {
-            if (sha256_support && index.sql_file_sha256[0] != '\0') {
-                if (calculate_sha256_main(sql_filename, current_sha)) {
+            if (index.sql_file_sha256[0] != '\0') {
+                if (calculate_sha256(sql_filename, current_sha)) {
                     if (strcmp(index.sql_file_sha256, current_sha) == 0) {
                         DEBUG_PRINT("SHA256 match. Using existing index.");
                         load_from_index = true;
@@ -104,7 +99,7 @@ int main(int argc, char *argv[]) {
                     write_to_index = true;
                 }
             } else {
-                 DEBUG_PRINT("No SHA256 in index or sha256sum not supported. Using index without verification.");
+                 DEBUG_PRINT("No SHA256 in index file. Using index without verification.");
                  load_from_index = true;
             }
         } else {
@@ -135,11 +130,11 @@ int main(int argc, char *argv[]) {
 
                 if (write_to_index) {
                     DEBUG_PRINT("Writing index to %s", index_filename);
-                    // Calculate hash only if supported and not already calculated
-                    if (sha256_support && current_sha[0] == '\0') {
-                        calculate_sha256_main(sql_filename, current_sha);
+                    // Calculate hash if not already calculated
+                    if (current_sha[0] == '\0') {
+                        calculate_sha256(sql_filename, current_sha);
                     }
-                    if (!write_index_to_file(&index, index_filename, sha256_support ? current_sha : NULL)) {
+                    if (!write_index_to_file(&index, index_filename, current_sha)) {
                         fprintf(stderr, "Error writing index file '%s'.\n", index_filename);
                     } else {
                         DEBUG_PRINT("Index written successfully.");
@@ -188,31 +183,3 @@ int main(int argc, char *argv[]) {
 }
 
 // --- Static Helper Function Implementations ---
-
-// Checks if a command exists in the system's PATH.
-static bool command_exists(const char *command) {
-    char check_command[256];
-    snprintf(check_command, sizeof(check_command), "command -v %s >/dev/null 2>&1", command);
-    return system(check_command) == 0;
-}
-
-// Calculates the SHA256 hash of a file using the `sha256sum` command.
-static bool calculate_sha256_main(const char *filename, char *hash_buffer) {
-    char command[1024];
-    snprintf(command, sizeof(command), "sha256sum \"%s\"", filename);
-
-    FILE *pipe = popen(command, "r");
-    if (!pipe) {
-        perror("popen() failed");
-        return false;
-    }
-
-    if (fscanf(pipe, "%64s", hash_buffer) != 1) {
-        fprintf(stderr, "Error reading SHA256 from pipe.\n");
-        pclose(pipe);
-        return false;
-    }
-
-    pclose(pipe);
-    return true;
-}

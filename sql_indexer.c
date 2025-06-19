@@ -7,6 +7,7 @@
 #include <errno.h> // Include for errno
 #include <strings.h> // Include for strncasecmp
 #include <cjson/cJSON.h>
+#include "sha256.h"
 
 #if defined(_WIN32) || defined(_WIN64) || defined(__MSYS__)
 // Windows/MSYS2 doesn't have strcasestr, so we provide one.
@@ -44,30 +45,41 @@ static bool add_column_to_table(TableInfo *table_info, const char *name, const c
 static const char* find_table_body_start(const char *ptr, const char *end);
 static const char* find_table_body_end(const char *ptr, const char *end);
 static void cleanup_table_info(TableInfo *table_info);
-static bool calculate_sha256(const char *filename, char *hash_buffer);
-
 // --- SHA256 Calculation ---
-// Calculates the SHA256 hash of a file using the `sha256sum` command.
+// Calculates the SHA256 hash of a file using the embedded sha256 implementation.
 // Returns true on success and populates the `hash_buffer` (must be 65 bytes).
 // Returns false on failure.
-static bool calculate_sha256(const char *filename, char *hash_buffer) {
-    char command[1024];
-    snprintf(command, sizeof(command), "sha256sum %s", filename);
-
-    FILE *pipe = popen(command, "r");
-    if (!pipe) {
-        perror("popen() failed");
+bool calculate_sha256(const char *filename, char *hash_buffer) {
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        perror("Failed to open file for hashing");
         return false;
     }
 
-    if (fread(hash_buffer, 1, 64, pipe) != 64) {
-        fprintf(stderr, "Error reading SHA256 from pipe.\n");
-        pclose(pipe);
+    SHA256_CTX ctx;
+    sha256_init(&ctx);
+
+    BYTE buf[CHUNK_SIZE];
+    size_t bytes_read;
+    while ((bytes_read = fread(buf, 1, CHUNK_SIZE, file))) {
+        sha256_update(&ctx, buf, bytes_read);
+    }
+
+    if (ferror(file)) {
+        perror("Error reading file for hashing");
+        fclose(file);
         return false;
     }
-    hash_buffer[64] = '\0'; // Null-terminate the hash string
 
-    pclose(pipe);
+    BYTE hash[SHA256_BLOCK_SIZE];
+    sha256_final(&ctx, hash);
+
+    for (int i = 0; i < SHA256_BLOCK_SIZE; i++) {
+        sprintf(hash_buffer + (i * 2), "%02x", hash[i]);
+    }
+    hash_buffer[64] = '\0';
+
+    fclose(file);
     return true;
 }
 // --- Function Implementations ---
