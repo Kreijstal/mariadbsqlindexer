@@ -13,5 +13,8 @@ set(CMAKE_C_STANDARD_REQUIRED True)
 add_compile_options(-Wall -Wextra -Werror -pedantic)
 
 find_package(Curses REQUIRED)
+find_package(cJSON REQUIRED)
+
 include_directories(${CURSES_INCLUDE_DIR})
-target_link_libraries(sql_indexer ${CURSES_LIBRARIES})
+
+target_link_libraries(sql_indexer PRIVATE ${CURSES_LIBRARIES} cjson)

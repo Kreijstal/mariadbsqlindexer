@@ -26,11 +26,19 @@ int main(int argc, char *argv[]) {
     char *index_filename = NULL; // Dynamically allocated
     bool load_from_index = false;
     bool write_to_index = false;
+    const char *dump_table_name = NULL;
 
     // --- Argument Parsing ---
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             verbose_mode = true;
+        } else if (strcmp(argv[i], "--dump-table") == 0) {
+            if (i + 1 < argc) {
+                dump_table_name = argv[++i];
+            } else {
+                fprintf(stderr, "Error: --dump-table requires a table name.\n");
+                return 1;
+            }
         } else if (argv[i][0] == '-') {
             fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
             print_usage(argv[0]);
@@ -143,24 +151,29 @@ int main(int argc, char *argv[]) {
     }
 
     if (success) {
-        DEBUG_PRINT("Printing results.");
-        print_results(&index);
+        if (dump_table_name) {
+            DEBUG_PRINT("Dumping table '%s' as JSON.", dump_table_name);
+            dump_table_as_json(&index, dump_table_name, sql_filename);
+        } else {
+            DEBUG_PRINT("Printing results.");
+            print_results(&index);
 
-        // --- Example: Get sample for the first table ---
-        if (index.count > 0 && index.entries[0].table_info && sql_filename) {
-             DEBUG_PRINT("Attempting to get sample row for table: %s", index.entries[0].table_info->name);
-             char* sample = get_first_row_sample(sql_filename, index.entries[0].table_info->end_offset, index.entries[0].table_info->name);
-             if (sample) {
-                 printf("\n--- Sample First Row for %s (Offset: %ld) ---\n", index.entries[0].table_info->name, index.entries[0].table_info->end_offset);
-                 printf("%s\n", sample);
-                 printf("------------------------------------------\n");
-                 free(sample);
-             } else {
-                 DEBUG_PRINT("Could not get sample row for table: %s", index.entries[0].table_info->name);
-             }
+            // --- Example: Get sample for the first table ---
+            if (index.count > 0 && index.entries[0].table_info && sql_filename) {
+                 DEBUG_PRINT("Attempting to get sample row for table: %s", index.entries[0].table_info->name);
+                 char* sample = get_first_row_sample(sql_filename, index.entries[0].table_info->end_offset, index.entries[0].table_info->name);
+                 if (sample) {
+                     printf("\n--- Sample First Row for %s (Offset: %ld) ---\n", index.entries[0].table_info->name, index.entries[0].table_info->end_offset);
+                     printf("%s\n", sample);
+                     printf("------------------------------------------\n");
+                     free(sample);
+                 } else {
+                     DEBUG_PRINT("Could not get sample row for table: %s", index.entries[0].table_info->name);
+                 }
+            }
+            // TODO: Add ncurses UI call here later
+            // display_table_columns_ui(&index);
         }
-        // TODO: Add ncurses UI call here later
-        // display_table_columns_ui(&index);
     }
 
     // Cleanup the index structure (if loaded or successfully parsed)

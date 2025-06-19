@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <errno.h> // Include for errno
 #include <strings.h> // Include for strncasecmp
+#include <cjson/cJSON.h>
 
 // --- Constants ---
 const char *CREATE_TABLE_KEYWORD = "CREATE TABLE";
@@ -1050,4 +1051,41 @@ char* get_first_row_sample(const char *filename, long start_offset, const char *
 
     fclose(fp);
     return sample;
+}
+
+void dump_table_as_json(const SqlIndex *index, const char *table_name, const char *sql_filename) {
+    // Find the table in the index
+    TableInfo *table_info = NULL;
+    for (int i = 0; i < index->count; ++i) {
+        if (strcmp(index->entries[i].type, "TABLE") == 0 && strcmp(index->entries[i].name, table_name) == 0) {
+            table_info = index->entries[i].table_info;
+            break;
+        }
+    }
+
+    if (!table_info) {
+        fprintf(stderr, "Table '%s' not found in index.\n", table_name);
+        return;
+    }
+
+    // Create JSON object
+    cJSON *root = cJSON_CreateObject();
+    cJSON *table = cJSON_AddObjectToObject(root, table_name);
+    cJSON *columns = cJSON_AddArrayToObject(table, "columns");
+    for (int i = 0; i < table_info->column_count; ++i) {
+        cJSON *column = cJSON_CreateObject();
+        cJSON_AddStringToObject(column, "name", table_info->columns[i].name);
+        cJSON_AddStringToObject(column, "type", table_info->columns[i].type);
+        cJSON_AddItemToArray(columns, column);
+    }
+
+    // TODO: Add logic to parse and add row data from the SQL file.
+    // This is a complex task that requires parsing the INSERT statements.
+    // For now, we just dump the schema.
+
+    char *json_string = cJSON_Print(root);
+    printf("%s\n", json_string);
+
+    cJSON_Delete(root);
+    free(json_string);
 }
