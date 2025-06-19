@@ -501,7 +501,17 @@ static bool add_index_entry(SqlIndex *index, const char *type, const char *name,
 }
 
 static bool add_table_entry(SqlIndex *index, const char *name, int line_number) {
-    // Allocate space in the index like add_index_entry
+    // First, check if this table already exists in the index.
+    // This can happen if a CREATE TABLE statement spans multiple chunks.
+    for (int i = 0; i < index->count; ++i) {
+        if (strcmp(index->entries[i].type, "TABLE") == 0 && strcmp(index->entries[i].name, name) == 0) {
+            // Table already exists, no need to add it again.
+            // We can assume we're now processing the complete statement.
+            return true;
+        }
+    }
+
+    // If it doesn't exist, add it.
     if (index->count >= index->capacity) {
         size_t new_capacity = index->capacity == 0 ? 16 : index->capacity * 2;
         IndexEntry *new_entries = realloc(index->entries, new_capacity * sizeof(IndexEntry));
@@ -628,7 +638,6 @@ static size_t process_chunk(ParsingContext *ctx) {
                             if (table_name) {
                                 strncpy(table_name, token_start, token_len);
                                 table_name[token_len] = '\0';
-
                                 // Remove potential backticks
                                 if (table_name[0] == '`' && table_name[token_len - 1] == '`') {
                                     memmove(table_name, table_name + 1, token_len - 2);
@@ -645,8 +654,20 @@ static size_t process_chunk(ParsingContext *ctx) {
                                 // Find the start of the table body (look for '(' after table name)
                                 const char *table_body_start = find_table_body_start(token_start + token_len, end);
                                 if (table_body_start) {
-                                    // Get the index of the table we just added
-                                    int table_idx = ctx->index.count - 1;
+                                    // Find the last entry for this table name
+                                    int table_idx = -1;
+                                    for (int i = ctx->index.count - 1; i >= 0; i--) {
+                                        if (strcmp(ctx->index.entries[i].type, "TABLE") == 0 && strcmp(ctx->index.entries[i].name, table_name) == 0) {
+                                            table_idx = i;
+                                            break;
+                                        }
+                                    }
+                                    if (table_idx == -1) {
+                                        // Should not happen due to add_table_entry logic
+                                        ctx->error_occurred = true;
+                                        free(table_name);
+                                        return processed_bytes;
+                                    }
                                     TableInfo *table_info = ctx->index.entries[table_idx].table_info;
                                     
                                     // Find the end of the table definition
@@ -666,10 +687,10 @@ static size_t process_chunk(ParsingContext *ctx) {
                                         // Move past the table definition
                                         ptr = table_body_end;
                                     } else {
-                                        // Just move past the table name and opening bracket
-                                        const char* offset_ptr = table_body_start ? table_body_start : token_start + token_len;
-                                        table_info->end_offset = ctx->global_offset + (offset_ptr - chunk_start);
-                                        ptr = offset_ptr;
+                                        // The CREATE TABLE statement is split across chunks.
+                                        processed_bytes = (ptr - chunk_start);
+                                        free(table_name);
+                                        return processed_bytes; // Return, so the buffer can be refilled
                                     }
                                 } else {
                                     // Move just past the table name
@@ -737,142 +758,150 @@ static const char* find_table_body_end(const char *ptr, const char *end) {
 
 // Parse column definitions from a CREATE TABLE statement
 bool parse_table_columns(ParsingContext *ctx, TableInfo *table_info, const char *start_ptr, const char *end_ptr) {
-    // Simple column parser - assumes clean SQL with one column per line
-    // Example: CREATE TABLE users (
-    //    id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    //    username VARCHAR(50) NOT NULL,
-    //    email VARCHAR(100) UNIQUE
-    // );
-    
-    const char *ptr = start_ptr;
-    const char *line_start = ptr;
-    char column_def[1024];
-    int column_def_pos = 0;
-    bool in_string = false;
-    char string_quote = 0;
+    const char *p = start_ptr;
     bool success = true;
-    
-    // Skip initial whitespace
-    while (ptr < end_ptr && isspace((unsigned char)*ptr)) ptr++;
-    line_start = ptr;
-    
-    while (ptr < end_ptr) {
-        // Handle strings with quotes to avoid mistaking quoted commas for column separators
-        if ((*ptr == '\'' || *ptr == '"' || *ptr == '`') && (ptr == start_ptr || *(ptr-1) != '\\')) {
-            if (!in_string) {
-                in_string = true;
-                string_quote = *ptr;
-            } else if (string_quote == *ptr) {
-                in_string = false;
-            }
+
+    while (p < end_ptr) {
+        // Skip leading whitespace and commas from previous iteration
+        while (p < end_ptr && (isspace((unsigned char)*p) || *p == ',')) {
+            p++;
         }
+        if (p >= end_ptr) break;
+
+        const char *line_start = p;
+        const char *line_end = NULL;
+        int paren_depth = 0;
+
+        // Find the end of the current definition (the next comma at parenthesis depth 0)
+        const char *scanner = p;
+        while (scanner < end_ptr) {
+            if (*scanner == '(') paren_depth++;
+            else if (*scanner == ')') paren_depth--;
+            else if (*scanner == ',' && paren_depth == 0) {
+                line_end = scanner;
+                break;
+            }
+            scanner++;
+        }
+        if (!line_end) {
+            // Could be the last definition before the closing ')' of the table
+            line_end = end_ptr -1; // Go to the char before the final ')'
+            while(line_end > line_start && isspace((unsigned char)*line_end)) line_end--;
+            line_end++; // point after the last char of the definition
+        }
+
+
+        // Copy the definition to a mutable buffer for strtok
+        char def[2048];
+        size_t len = line_end - line_start;
+        if (len >= sizeof(def)) len = sizeof(def) - 1;
+        strncpy(def, line_start, len);
+        def[len] = '\0';
         
-        // Check for column separator (comma) or end of definition
-        if (!in_string && (*ptr == ',' || ptr == end_ptr - 1)) {
-            // Copy the current column definition
-            size_t col_len = ptr - line_start;
-            if (col_len > 0 && col_len < sizeof(column_def) - 1) {
-                strncpy(column_def, line_start, col_len);
-                column_def[col_len] = '\0';
+        // Create a copy for checking the first word, as strtok modifies it
+        char def_copy[2048];
+        strncpy(def_copy, def, sizeof(def_copy));
+
+        char *first_word = strtok(def_copy, " \t\n\r");
+        if (!first_word) {
+            p = line_end + 1;
+            continue;
+        }
+
+        if (strcasecmp(first_word, "PRIMARY") == 0 || strcasecmp(first_word, "UNIQUE") == 0) {
+            // It's a table-level constraint like PRIMARY KEY (col1, col2)
+            char *key_type = first_word;
+            char *cols_part = strchr(def, '(');
+            if (cols_part) {
+                char *cols_end = strrchr(cols_part, ')');
+                if (cols_end) *cols_end = '\0';
                 
-                // Parse the column definition
-                // For a simple implementation, just extract the first token as the name
-                // and the second token as the type
-                char *col_name = NULL;
-                char *col_type = NULL;
-                bool is_primary_key = false;
-                bool is_not_null = false;
-                bool is_auto_increment = false;
-                char *default_value = NULL;
-                
-                // Tokenize the column definition
-                char *token = strtok(column_def, " \t\n\r");
-                if (token) {
-                    // First token is the column name (may be quoted)
-                    col_name = token;
-                    
-                    // Remove backticks if present
-                    if (col_name[0] == '`') {
-                        col_name++; // Skip opening backtick
-                        char *end_backtick = strchr(col_name, '`');
-                        if (end_backtick) *end_backtick = '\0';
-                    }
-                    
-                    // Next token should be the type
-                    token = strtok(NULL, " \t\n\r");
-                    if (token) {
-                        col_type = token;
-                        
-                        // Combine type with size/precision if present
-                        if (strchr(col_type, '(') && !strchr(col_type, ')')) {
-                            // Type declaration spans multiple tokens, e.g., VARCHAR(50)
-                            char *next_token = strtok(NULL, " \t\n\r");
-                            while (next_token) {
-                                // Append to type
-                                size_t current_len = strlen(col_type);
-                                size_t append_len = strlen(next_token) + 2; // +1 for space, +1 for null
-                                char *new_type = realloc(col_type, current_len + append_len);
-                                if (new_type) {
-                                    col_type = new_type;
-                                    strcat(col_type, " ");
-                                    strcat(col_type, next_token);
+                char *col_name = strtok(cols_part + 1, ",` ");
+                while (col_name) {
+                    if (strlen(col_name) > 0) {
+                        for (int i = 0; i < table_info->column_count; i++) {
+                            if (strcmp(table_info->columns[i].name, col_name) == 0) {
+                                if (strcasecmp(key_type, "PRIMARY") == 0) {
+                                    table_info->columns[i].is_primary_key = true;
                                 }
-                                
-                                // Stop if we've closed the parenthesis
-                                if (strchr(next_token, ')')) break;
-                                next_token = strtok(NULL, " \t\n\r");
+                                // Could handle UNIQUE here as well
+                                break;
                             }
                         }
-                        
-                        // Parse the rest of the tokens for constraints
-                        token = strtok(NULL, " \t\n\r");
-                        while (token) {
-                            if (strcasecmp(token, "PRIMARY") == 0) {
-                                // Check for "PRIMARY KEY"
-                                char *next = strtok(NULL, " \t\n\r");
-                                if (next && strcasecmp(next, "KEY") == 0) {
-                                    is_primary_key = true;
-                                }
-                            } else if (strcasecmp(token, "NOT") == 0) {
-                                // Check for "NOT NULL"
-                                char *next = strtok(NULL, " \t\n\r");
-                                if (next && strcasecmp(next, "NULL") == 0) {
-                                    is_not_null = true;
-                                }
-                            } else if (strcasecmp(token, "AUTO_INCREMENT") == 0) {
-                                is_auto_increment = true;
-                            } else if (strcasecmp(token, "DEFAULT") == 0) {
-                                // Get the default value
-                                default_value = strtok(NULL, " \t\n\r");
-                            }
-                            
-                            token = strtok(NULL, " \t\n\r");
-                        }
                     }
+                    col_name = strtok(NULL, ",` ");
                 }
-                
-                // Add the column to the table
-                if (col_name && col_type) {
-                    if (!add_column_to_table(table_info, col_name, col_type, 
-                                           is_primary_key, is_not_null, 
-                                           is_auto_increment, default_value)) {
-                        fprintf(stderr, "Error adding column %s to table %s\n", 
-                               col_name, table_info->name);
-                        success = false;
+            }
+        } else if (strcasecmp(first_word, "CONSTRAINT") != 0 && strcasecmp(first_word, "KEY") != 0 && strcasecmp(first_word, "FOREIGN") != 0) {
+            // It's a column definition
+            char *col_name = NULL, *col_type = NULL, *default_value = NULL;
+            bool is_pk = false, is_nn = false, is_ai = false;
+
+            // Use the original `def` buffer for parsing the column
+            char *token = strtok(def, " \t\n\r");
+            if (token) {
+                // First token is the name
+                if (token[0] == '`') {
+                    col_name = token + 1;
+                    char *end_tick = strchr(col_name, '`');
+                    if (end_tick) *end_tick = '\0';
+                } else {
+                    col_name = token;
+                }
+
+                // Second token is the type
+                token = strtok(NULL, " \t\n\r");
+                if (token) {
+                    // The type might contain spaces or parentheses, e.g., "VARCHAR(255)", "ENUM('M', 'F')"
+                    // We need to reconstruct it carefully.
+                    char type_buffer[256];
+                    strncpy(type_buffer, token, sizeof(type_buffer) - 1);
+                    type_buffer[sizeof(type_buffer) - 1] = '\0';
+
+                    int paren_depth = 0;
+                    for (char *c = type_buffer; *c; c++) {
+                        if (*c == '(') paren_depth++;
+                        else if (*c == ')') paren_depth--;
+                    }
+
+                    while (paren_depth > 0 && (token = strtok(NULL, " \t\n\r,"))) {
+                        strncat(type_buffer, " ", sizeof(type_buffer) - strlen(type_buffer) - 1);
+                        strncat(type_buffer, token, sizeof(type_buffer) - strlen(type_buffer) - 1);
+                        for (char *c = (char*)token; *c; c++) {
+                            if (*c == '(') paren_depth++;
+                            else if (*c == ')') paren_depth--;
+                        }
+                    }
+                    col_type = type_buffer;
+                }
+
+
+                // Parse remaining attributes
+                while ((token = strtok(NULL, " \t\n\r,"))) {
+                    if (strcasecmp(token, "NOT") == 0) {
+                        char* next = strtok(NULL, " \t\n\r,");
+                        if (next && strcasecmp(next, "NULL") == 0) is_nn = true;
+                    } else if (strcasecmp(token, "AUTO_INCREMENT") == 0) {
+                        is_ai = true;
+                    } else if (strcasecmp(token, "PRIMARY") == 0) {
+                         char* next = strtok(NULL, " \t\n\r,");
+                        if (next && strcasecmp(next, "KEY") == 0) is_pk = true;
+                    } else if (strcasecmp(token, "DEFAULT") == 0) {
+                        default_value = strtok(NULL, " \t\n\r,");
                     }
                 }
             }
             
-            // Move to the next column definition
-            ptr++;
-            while (ptr < end_ptr && isspace((unsigned char)*ptr)) ptr++;
-            line_start = ptr;
-            column_def_pos = 0;
-        } else {
-            ptr++;
+            if (col_name && col_type) {
+                if (!add_column_to_table(table_info, col_name, col_type, is_pk, is_nn, is_ai, default_value)) {
+                    fprintf(stderr, "Error adding column %s to table %s\n", col_name, table_info->name);
+                    success = false;
+                }
+            }
         }
+        
+        p = line_end + 1;
     }
-    
     return success;
 }
 
@@ -1073,15 +1102,114 @@ void dump_table_as_json(const SqlIndex *index, const char *table_name, const cha
     cJSON *table = cJSON_AddObjectToObject(root, table_name);
     cJSON *columns = cJSON_AddArrayToObject(table, "columns");
     for (int i = 0; i < table_info->column_count; ++i) {
+        ColumnInfo *col_info = &table_info->columns[i];
         cJSON *column = cJSON_CreateObject();
-        cJSON_AddStringToObject(column, "name", table_info->columns[i].name);
-        cJSON_AddStringToObject(column, "type", table_info->columns[i].type);
+        cJSON_AddStringToObject(column, "name", col_info->name);
+        cJSON_AddStringToObject(column, "type", col_info->type);
+        cJSON_AddBoolToObject(column, "is_primary_key", col_info->is_primary_key);
+        cJSON_AddBoolToObject(column, "is_not_null", col_info->is_not_null);
+        cJSON_AddBoolToObject(column, "is_auto_increment", col_info->is_auto_increment);
+        if (col_info->default_value) {
+            cJSON_AddStringToObject(column, "default", col_info->default_value);
+        }
         cJSON_AddItemToArray(columns, column);
     }
 
-    // TODO: Add logic to parse and add row data from the SQL file.
-    // This is a complex task that requires parsing the INSERT statements.
-    // For now, we just dump the schema.
+    cJSON *rows = cJSON_AddArrayToObject(table, "rows");
+
+    FILE *fp = fopen(sql_filename, "rb");
+    if (!fp) {
+        perror("dump_table_as_json: Error opening file");
+        cJSON_Delete(root);
+        return;
+    }
+
+    fseek(fp, table_info->end_offset, SEEK_SET);
+
+    char *buffer = malloc(CHUNK_SIZE + 1);
+    if (!buffer) {
+        perror("Failed to allocate buffer for JSON dump");
+        fclose(fp);
+        cJSON_Delete(root);
+        return;
+    }
+
+    size_t bytes_read;
+    while ((bytes_read = fread(buffer, 1, CHUNK_SIZE, fp)) > 0) {
+        buffer[bytes_read] = '\0';
+        char *p = buffer;
+        while ((p = strcasestr(p, "INSERT INTO"))) {
+            // Basic check for correct table name
+            char *name_start = p + 11;
+            while (isspace(*name_start) || *name_start == '`') name_start++;
+            if (strncmp(name_start, table_name, strlen(table_name)) != 0) {
+                p++;
+                continue;
+            }
+
+            char *values = strcasestr(p, "VALUES");
+            if (!values) break;
+
+            p = values + 6;
+            // Find the end of the INSERT statement
+            char *stmt_end = strchr(p, ';');
+            if (!stmt_end) {
+                // If no semicolon, assume it ends at the end of the buffer
+                // This is a simplification.
+                stmt_end = p + strlen(p);
+            }
+
+            // Loop through all (...) value sets within this single INSERT statement
+            while ((p = strchr(p, '(')) && p < stmt_end) {
+                p++; // Move past '('
+                cJSON *row_array = cJSON_CreateArray();
+                char *row_end = strchr(p, ')');
+                if (!row_end || row_end > stmt_end) break; // Row is malformed or part of another statement
+
+                char *value_start = p;
+                while (value_start < row_end) {
+                    // Find the end of the current value
+                    char *value_end = value_start;
+                    bool in_string = false;
+                    while (value_end < row_end) {
+                        if (*value_end == '\'') in_string = !in_string;
+                        if (*value_end == ',' && !in_string) break;
+                        value_end++;
+                    }
+
+                    // Extract and clean the value
+                    char value_buffer[256];
+                    size_t len = value_end - value_start;
+                    if (len >= sizeof(value_buffer)) len = sizeof(value_buffer) - 1;
+                    strncpy(value_buffer, value_start, len);
+                    value_buffer[len] = '\0';
+
+                    // Trim quotes and whitespace
+                    char *trimmed_start = value_buffer;
+                    while (isspace(*trimmed_start) || *trimmed_start == '\'') trimmed_start++;
+                    char *trimmed_end = trimmed_start + strlen(trimmed_start) - 1;
+                    while (trimmed_end > trimmed_start && (isspace(*trimmed_end) || *trimmed_end == '\'')) *trimmed_end-- = '\0';
+
+                    // Add to JSON array
+                    char *endptr;
+                    double num = strtod(trimmed_start, &endptr);
+                    if (*endptr == '\0' && strlen(trimmed_start) > 0) {
+                        cJSON_AddItemToArray(row_array, cJSON_CreateNumber(num));
+                    } else {
+                        cJSON_AddItemToArray(row_array, cJSON_CreateString(trimmed_start));
+                    }
+
+                    value_start = value_end + 1;
+                }
+                cJSON_AddItemToArray(rows, row_array);
+                p = row_end + 1;
+            }
+            p = stmt_end + 1; // Continue searching after this statement
+        }
+    }
+
+    free(buffer);
+    fclose(fp);
 
     char *json_string = cJSON_Print(root);
     printf("%s\n", json_string);
